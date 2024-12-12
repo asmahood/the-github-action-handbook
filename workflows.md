@@ -12,7 +12,16 @@
   - [Configuring workflows to run for manual events](#configuring-workflows-to-run-for-manual-events)
   - [Configuring workflows to run for webhook events](#configuring-workflows-to-run-for-webhook-events)
   - [Workflow permissions](#workflow-permissions)
+  - [Configuring the workflow to run across multiple OS/Language Versions](#configuring-the-workflow-to-run-across-multiple-oslanguage-versions)
 - [Use conditional keywords](#use-conditional-keywords)
+- [Environment Variables and Contexts](#environment-variables-and-contexts)
+- [Scripts](#scripts)
+- [Caching with the Cache Action](#caching-with-the-cache-action)
+- [Artifacts](#artifacts)
+  - [Storing Artifacts](#storing-artifacts)
+  - [Downloading Artifacts](#downloading-artifacts)
+- [Accessing Workflow Logs](#acessing-workflow-logs)
+  - [Using the REST API](#using-the-rest-api)
 - [Disable and Delete Workflows](#disable-and-delete-workflows)
 - [Configuring an Action](#configuring-an-action)
   - [Use specific versions of an action](#use-specific-versions-of-an-action)
@@ -153,6 +162,40 @@ permissions:
   pull-requests: write
 ```
 
+### Configuring the workflow to run across multiple OS/language versions
+
+To run a worflow against different operating systems or different versions of a language, you need to configure a build matrix:
+
+```yml
+strategy:
+  matrix:
+    os: [ubuntu-latest, windows-latest]
+    node-version: [16.x, 18.x]
+```
+
+A matrix defined like this will produce four builds, one for each OS/language version pair. Sorting through four different builds for errors can be difficult, so it is recommened to test in a dedicated job. Separating the build and test steps makes it easier to understand the logs:
+
+```yml
+test:
+  runs-on: ${{ matrix.os }}
+  strategy:
+    matrix:
+      os: [ubuntu-latest, windows-latest]
+      node-version: [16.x, 18.x]
+  steps:
+  - uses: actions/checkout@v3
+  - name: Use Node.js ${{ matrix.node-version }}
+    uses: actions/setup-node@v3
+    with:
+      node-version: ${{ matrix.node-version }}
+  - name: npm install, and test
+    run: |
+      npm install
+      npm test
+    env:
+      CI: true
+```
+
 This gives the workflow permission to write to pull requests.
 
 ## Use conditional keywords
@@ -173,19 +216,153 @@ jobs:
 
 Notice that in this example, the `${{ }}` are missing from the syntax. With some expressions, as in the case of the `if` conditional, you can omit the expression syntax. Github automatically evaluates some of these common expressions, but you can always include them in case you forget which expressions Github automatically evaluates.
 
+## Environment Variables and Contexts
+
+Within the GitHub Actions workflow, there are several default environment variables that are available for you to use, but only within the runner that's executing a job. In addition to default environment variables, you can use defined variables as contexts. Contexts and default variables are similar in that they both provide access to environment information, but they have some important differences. While default environment variables can only be used within the runner, context variables can be used at any point within the workflow. For example, context variables allow you to run an if statement to evaluate an expression before the runner is executed:
+
+```yml
+name: CI
+on: push
+jobs:
+  prod-check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Deploying to production server on branch $GITHUB_REF"
+```
+
+Similar to using default environment variables, you can use custom environment variables in your workflow file. To create a custom variable, you need to define it in your workflow file using the `env` context. If you want to use the value of an environment variable inside a runner, you can use the runner operating system's normal method for reading environment variables.
+
+```yml
+name: CI
+on: push
+jobs:
+  prod-check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Nice work, $First_Name. Deploying to production server on branch $GITHUB_REF"
+        env:
+          First_Name: Mona
+```
+
+## Scripts
+
+The `run` keyword is used to tell the job to execute a command on the runner. For example, you can install NPM dependencies:
+
+```yml
+jobs:
+  example-job:
+    steps:
+      - run: npm install -g bats
+```
+
+You can also run a script stored in your repository as an action. This is often done in a `.github/scripts` directory, and then supply the path and shell type using the `run` keyword:
+
+```yml
+jobs:
+  example-job:
+    steps:
+      - name: Run build script
+        run: ./.github/scripts/build.sh
+        shell: bash
+```
+
+You can also write a script inline:
+
+```yml
+jobs:
+  example-job:
+    steps:
+      - run: |
+      npm install
+      npm test
+```
+
+## Caching with the Cache Action
+
+You can cache dependencies to prevent them from being installed over and over again by using the `cache` action. This action retrieves a cache identified by a unique key that you provide. When the action finds the cache, it then retreives the cached files to the path that you configure. To use the `cache` action, you'll need to set a few specific parameters:
+
+- `key`: refers to the key identifier created when saving and searching for a cache
+- `path`: refers to the file path on the runner to cache or search
+- *(Optional)* `restore-keys`: consists of alternative existing keys to caches if the desired cache key isn't found
+
+For example, to cache NPM dependencies:
+
+```yml
+steps:
+  - uses: actions/checkout@v2
+
+  - name: Cache NPM dependencies
+    uses: actions/cache@v2
+    with:
+      path: ~/.npm
+      key: ${{ runner.os }}-npm-cache-${{ hashFiles('**/package-lock.json') }}
+      restore-keys: |
+        ${{ runner.os }}-npm-cache-
+```
+
+## Artifacts
+When a workflow produces something other than a log entry, the product is called an **artifact**. Artifacts can be uploaded to storage by using the action `actions/upload-artifact` and later downloaded from storage by using the action `actions/download-artifact`.
+
+Storing an artifact preserves it between jobs. Each job uses a fresh instance of a virtual machine (VM), so you can't reuse the artifact by saving it on the VM. If you need your artifact in a different job, you can upload the artifact to storage in one job, and download it for the other job.
+
+### Storing Artifacts
+To store an artifact, use the `actions/upload-artifact` action like so:
+
+```yml
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: npm install and build webpack
+        run: |
+          npm install
+          npm run build
+      - uses: actions/upload-artifact@main
+        with:
+          name: webpack artifacts
+          path: public/
+```
+
+### Downloading Artifacts
+
+To download an artifact for testing, use the `actions/download-artifact` action:
+
+```yml
+test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/download-artifact@main
+      with:
+        name: webpack artifacts
+        path: public
+```
+Note that to be successful the artifact needs to be uploaded successfully. This is why we add the `needs: build` property on the `test` job so that if the `build` job fails, the `test` job won't run, thus preventing errors from the artifact not existing.
+
+## Acessing Workflow Logs
+
+Workflow logs can be accessed in two ways:
+
+1. Through the user interface on Github
+2. Through the REST API
+
+### Using the REST API
+
+To view a workflow run's log using the API, you need to send a `GET` request to the logs endpoint:
+
+```http
+GET /repos/{owner}/{repo}/actions/runs/{run_id}/logs
+```
+
 ## Disable and Delete Workflows
 You can stop a workflow from being triggered without having to delete the file from the repo, either on GitHub or through the GitHub REST API. When you wish to enable the workflow again, you can easily do it using the same methods.
 
 ![Disable workflow in repo](./img/disable-workflow.png)
 
 You can also cancel a workflow run that's in progress in the Github UI from the Actions tab or by using the Github API endpoint `DELETE /repos/{owner}/{repo}/actions/runs/{run_id}`. Keep in mind that when you cancel a workflow run, Github will cancel all of its jobs and steps within that run.
-
-<table width="100%">
-<tr>
-  <td align="left"><a href="introduction.md">Previous: Introduction</a></td>
-  <td align="right"><a href="">Next: </a></td>
-</tr>
-</table>
 
 ## Configuring an Action
 
@@ -204,3 +381,10 @@ steps:
   # Reference a branch
   - uses: actions/setup-node@main
 ```
+
+<table width="100%">
+<tr>
+  <td align="left"><a href="introduction.md">Previous: Introduction</a></td>
+  <td align="right"><a href="">Next: </a></td>
+</tr>
+</table>
